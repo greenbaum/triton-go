@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/authentication"
 	"github.com/joyent/triton-go/errors"
@@ -51,6 +52,7 @@ var (
 // Client represents a connection to the Triton Compute or Object Storage APIs.
 type Client struct {
 	HTTPClient    *http.Client
+	WSDialer      *websocket.Dialer
 	RequestHeader *http.Header
 	Authorizers   []authentication.Signer
 	TritonURL     url.URL
@@ -149,6 +151,7 @@ func New(tritonURL string, mantaURL string, accountName string, signers ...authe
 			Transport:     httpTransport(false),
 			CheckRedirect: doNotFollowRedirects,
 		},
+		//WSDialer:    &websocket.Dialer{},
 		Authorizers: authorizers,
 		TritonURL:   *cloudURL,
 		MantaURL:    *storageURL,
@@ -200,6 +203,17 @@ func (c *Client) InsecureSkipTLSVerify() {
 	}
 
 	c.HTTPClient.Transport = httpTransport(true)
+	c.WSDialer = wsTransport(true)
+}
+
+// wsTransport is responsible for setting up our WS client's transport
+// settings
+func wsTransport(insecureSkipTLSVerify bool) *websocket.Dialer {
+	return &websocket.Dialer{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecureSkipTLSVerify,
+		},
+	}
 }
 
 // httpTransport is responsible for setting up our HTTP client's transport
@@ -338,6 +352,81 @@ func (c *Client) ExecuteRequestURIParams(ctx context.Context, inputs RequestInpu
 
 func (c *Client) ExecuteRequest(ctx context.Context, inputs RequestInput) (io.ReadCloser, error) {
 	return c.ExecuteRequestURIParams(ctx, inputs)
+}
+
+func (c *Client) ExecuteRequestChangeFeed(ctx context.Context, inputs RequestInput) (*websocket.Conn, error) {
+	defer c.resetHeader()
+
+	method := inputs.Method
+	path := inputs.Path
+	body := inputs.Body
+	query := inputs.Query
+
+	var requestBody io.Reader
+	if body != nil {
+		marshaled, err := json.MarshalIndent(body, "", "    ")
+		if err != nil {
+			return nil, err
+		}
+		requestBody = bytes.NewReader(marshaled)
+	}
+
+	endpoint := c.TritonURL
+	endpoint.Path = path
+	if query != nil {
+		endpoint.RawQuery = query.Encode()
+	}
+
+	req, err := http.NewRequest(method, endpoint.String(), requestBody)
+	if err != nil {
+		return nil, pkgerrors.Wrapf(err, "unable to construct HTTP request")
+	}
+	// TritonURL is https, we will swap that for wss
+	req.URL.Scheme = "wss"
+
+	dateHeader := time.Now().UTC().Format(time.RFC1123)
+	req.Header.Set("date", dateHeader)
+
+	// NewClient ensures there's always an authorizer (unless this is called
+	// outside that constructor).
+	authHeader, err := c.Authorizers[0].Sign(dateHeader, false)
+	if err != nil {
+		return nil, pkgerrors.Wrapf(err, "unable to sign HTTP request")
+	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Version", triton.CloudAPIMajorVersion)
+	req.Header.Set("User-Agent", triton.UserAgent())
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	c.overrideHeader(req)
+
+	conn, resp, err := c.WSDialer.Dial(req.URL.String(), req.Header)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(c, resp, err)
+
+	return conn, nil
+
+	// We will only return a response from the API it is in the HTTP StatusCode
+	// 2xx range
+	// StatusMultipleChoices is StatusCode 300
+	//if resp.StatusCode >= http.StatusOK &&
+	//resp.StatusCode < http.StatusMultipleChoices {
+	//return resp, nil
+	//}
+
+	// GetMachine returns a HTTP 410 response for deleted instances, but the body of the response is still a valid machine object with a State value of "deleted". Return the object to the caller as well as an error.
+	//if inputs.PreserveGone && resp.StatusCode == http.StatusGone {
+	//// Do not consume the response body.
+	//return resp, c.DecodeError(resp, req.Method, false)
+	//}
+
+	//return nil, c.DecodeError(resp, req.Method, true)
 }
 
 func (c *Client) ExecuteRequestRaw(ctx context.Context, inputs RequestInput) (*http.Response, error) {

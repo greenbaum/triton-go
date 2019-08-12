@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/joyent/triton-go/client"
 	"github.com/joyent/triton-go/errors"
 	pkgerrors "github.com/pkg/errors"
@@ -143,6 +145,39 @@ func (c *InstancesClient) Count(ctx context.Context, input *ListInstancesInput) 
 	}
 
 	return result, nil
+}
+
+type SubscribeInput struct {
+	Resource string `json:"resource"`
+}
+
+func (c *InstancesClient) Subscribe(ctx context.Context, input *SubscribeInput) {
+	fullPath := path.Join("/", c.client.AccountName, "subscribe", input.Resource, "machines")
+	reqInputs := client.RequestInput{
+		Method: http.MethodGet,
+		Path:   fullPath,
+	}
+	conn, err := c.client.ExecuteRequestChangeFeed(ctx, reqInputs)
+	if err != nil {
+		fmt.Println(conn, err)
+	}
+
+	defer func() {
+		conn.Close()
+	}()
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
+			break
+		}
+		fmt.Println(string(message))
+
+	}
+	return
 }
 
 func (c *InstancesClient) Get(ctx context.Context, input *GetInstanceInput) (*Instance, error) {

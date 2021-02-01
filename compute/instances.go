@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Joyent, Inc.
+// Copyright 2020 Joyent, Inc.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -83,6 +83,7 @@ type Instance struct {
 	Package            string                 `json:"package"`
 	DomainNames        []string               `json:"dns_names"`
 	DeletionProtection bool                   `json:"deletion_protection"`
+	DelegateDataset    bool                   `json:"delegate_dataset,omitempty"`
 	CNS                InstanceCNS
 }
 
@@ -326,6 +327,7 @@ type CreateInstanceInput struct {
 	Metadata        map[string]string
 	Tags            map[string]string //
 	FirewallEnabled bool              //
+	DelegateDataset bool
 	CNS             InstanceCNS
 	Volumes         []InstanceVolume
 }
@@ -341,6 +343,7 @@ func (input *CreateInstanceInput) toAPI() (map[string]interface{}, error) {
 	result := make(map[string]interface{}, numExtraParams+len(input.Metadata)+len(input.Tags))
 
 	result["firewall_enabled"] = input.FirewallEnabled
+	result["delegate_dataset"] = input.DelegateDataset
 
 	if input.Name != "" {
 		result["name"] = input.Name
@@ -698,26 +701,21 @@ func (c *InstancesClient) GetMetadata(ctx context.Context, input *GetMetadataInp
 		Method: http.MethodGet,
 		Path:   fullPath,
 	}
-	response, err := c.client.ExecuteRequestRaw(ctx, reqInputs)
+	respReader, err := c.client.ExecuteRequest(ctx, reqInputs)
+	if respReader != nil {
+		defer respReader.Close()
+	}
 	if err != nil {
 		return "", pkgerrors.Wrap(err, "unable to get machine metadata")
 	}
-	if response != nil {
-		defer response.Body.Close()
-	}
-	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
-		return "", &errors.APIError{
-			StatusCode: response.StatusCode,
-			Code:       "ResourceNotFound",
-		}
-	}
 
-	body, err := ioutil.ReadAll(response.Body)
-	if err != nil {
+	var result string
+	decoder := json.NewDecoder(respReader)
+	if err = decoder.Decode(&result); err != nil {
 		return "", pkgerrors.Wrap(err, "unable to decode get machine metadata response")
 	}
 
-	return fmt.Sprintf("%s", body), nil
+	return result, nil
 }
 
 type ListMetadataInput struct {

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2018, Joyent, Inc. All rights reserved.
+// Copyright 2020 Joyent, Inc.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -11,16 +11,14 @@ package compute_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"testing"
 
-	"github.com/abdullin/seq"
-	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/compute"
 	"github.com/joyent/triton-go/testutils"
 )
@@ -28,89 +26,130 @@ import (
 var (
 	fakePackageId   = "7b17343c-94af-6266-e0e8-893a3b9993d0"
 	fakePackageName = "g4-test"
+	testPackageID   = ""
+	testPackageName = ""
 )
 
 func TestAccPackagesList(t *testing.T) {
-	const stateKey = "packages"
-	const package1ID = "14ad9d54-d0f8-11e5-a759-93bdb33c9583"
-	const package2ID = "14af2214-d0f8-11e5-9399-77e0d621f66d"
-
 	testutils.AccTest(t, testutils.TestCase{
 		Steps: []testutils.Step{
 
-			&testutils.StepClient{
-				StateBagKey: stateKey,
-				CallFunc: func(config *triton.ClientConfig) (interface{}, error) {
-					return compute.NewClient(config)
-				},
-			},
-
-			&testutils.StepAPICall{
-				StateBagKey: stateKey,
-				CallFunc: func(client interface{}) (interface{}, error) {
-					c := client.(*compute.ComputeClient)
+			&testutils.StepComputeClient{
+				StateBagKey: "package",
+				CallFunc: func(state testutils.TritonStateBag, c *compute.ComputeClient) (interface{}, error) {
 					ctx := context.Background()
 					input := &compute.ListPackagesInput{}
-					return c.Packages().List(ctx, input)
-				},
-			},
-
-			&testutils.StepAssertFunc{
-				AssertFunc: func(state testutils.TritonStateBag) error {
-					packages, ok := state.GetOk(stateKey)
-					if !ok {
-						return fmt.Errorf("state key %q not found", stateKey)
+					pkgs, err := c.Packages().List(ctx, input)
+					if err != nil {
+						log.Fatalf("Packages.List failed: %v", err)
 					}
 
-					toFind := []string{package1ID, package2ID}
-					for _, pkgID := range toFind {
-						found := false
-						for _, pkg := range packages.([]*compute.Package) {
-							if pkg.ID == pkgID {
-								found = true
-								state.Put(pkg.ID, pkg)
+					if len(pkgs) == 0 {
+						t.Fatal("No packages returned from package list")
+					}
+
+					testPackageID = pkgs[0].ID
+					testPackageName = pkgs[0].Name
+					for _, pkg := range pkgs {
+						if len(pkg.Disks) != 0 {
+							if pkg.Brand != "bhyve" {
+								t.Fatalf("Package with disks does not have brand \"bhyve\": %+v", pkg.Disks)
+							}
+							for _, dsk := range pkg.Disks {
+								if dsk.OSDiskSize {
+									if dsk.Remaining {
+										t.Errorf("OS Disk should not have Remaining set: %+v", dsk)
+									}
+								} else if dsk.Remaining {
+									if dsk.SizeInMiB != 0 {
+										t.Errorf("Disk with Remaining size should not have SizeInMiB: %+v", dsk)
+									}
+								} else {
+									if dsk.SizeInMiB < 0 {
+										t.Errorf("Disk SizeInMiB must be greater than zero: %+v", dsk)
+									}
+								}
 							}
 						}
-						if !found {
-							return fmt.Errorf("couldn't find package %q", pkgID)
+					}
+					if testPackageID == "" {
+						t.Fatalf("Package does not have an ID %+v", pkgs[0])
+					}
+
+					return pkgs[0], nil
+				},
+			},
+		},
+	})
+}
+
+func TestAccPackagesListByName(t *testing.T) {
+	testutils.AccTest(t, testutils.TestCase{
+		Steps: []testutils.Step{
+
+			&testutils.StepComputeClient{
+				StateBagKey: "package",
+				CallFunc: func(state testutils.TritonStateBag, c *compute.ComputeClient) (interface{}, error) {
+					if testPackageID == "" {
+						t.Skip("No package id")
+					}
+					ctx := context.Background()
+					input := &compute.ListPackagesInput{
+						Name: testPackageName,
+					}
+					pkgs, err := c.Packages().List(ctx, input)
+					if err != nil {
+						log.Fatalf("Packages.List failed: %v", err)
+					}
+
+					if len(pkgs) == 0 {
+						t.Fatal("No packages returned from package list")
+					}
+
+					for _, foundPkg := range pkgs {
+						if foundPkg.Name != testPackageName {
+							t.Fatalf("Expected package name %s, got %s",
+								testPackageName, foundPkg.Name)
 						}
 					}
 
-					return nil
+					return pkgs[0], nil
 				},
 			},
+		},
+	})
+}
 
-			&testutils.StepAssert{
-				StateBagKey: package1ID,
-				Assertions: seq.Map{
-					"name":        "g4-highcpu-128M",
-					"memory":      128,
-					"disk":        3072,
-					"swap":        512,
-					"vcpus":       0,
-					"lwps":        4000,
-					"default":     false,
-					"id":          "14ad9d54-d0f8-11e5-a759-93bdb33c9583",
-					"version":     "1.0.3",
-					"description": "Compute Optimized 128M RAM - 0.0625 vCPU - 3 GB Disk",
-					"group":       "Compute Optimized",
-				},
-			},
+func TestAccPackagesGet(t *testing.T) {
+	testutils.AccTest(t, testutils.TestCase{
+		Steps: []testutils.Step{
 
-			&testutils.StepAssert{
-				StateBagKey: package2ID,
-				Assertions: seq.Map{
-					"name":        "g4-highcpu-1G",
-					"memory":      1024,
-					"disk":        25600,
-					"swap":        4096,
-					"vcpus":       0,
-					"lwps":        4000,
-					"default":     true,
-					"id":          "14af2214-d0f8-11e5-9399-77e0d621f66d",
-					"version":     "1.0.3",
-					"description": "Compute Optimized 1G RAM - 0.5 vCPU - 25 GB Disk",
-					"group":       "Compute Optimized",
+			&testutils.StepComputeClient{
+				StateBagKey: "package",
+				CallFunc: func(state testutils.TritonStateBag, c *compute.ComputeClient) (interface{}, error) {
+					if testPackageID == "" {
+						t.Skip("No package id")
+					}
+					ctx := context.Background()
+					input := &compute.GetPackageInput{
+						ID: testPackageID,
+					}
+					foundPkg, err := c.Packages().Get(ctx, input)
+					if err != nil {
+						log.Fatalf("Packages.Get failed: %v", err)
+					}
+
+					if foundPkg.ID != testPackageID {
+						t.Fatalf("Expected package id %s, got %s",
+							testPackageID, foundPkg.ID)
+					}
+
+					if foundPkg.Name != testPackageName {
+						t.Fatalf("Expected package name %s, got %s",
+							testPackageName, foundPkg.Name)
+					}
+
+					return foundPkg, nil
 				},
 			},
 		},
@@ -276,6 +315,86 @@ func TestGetPackage(t *testing.T) {
 			t.Errorf("expected error to equal testError: found %s", err)
 		}
 	})
+
+	t.Run("bhyve_disks", func(t *testing.T) {
+		testutils.RegisterResponder("GET", path.Join("/", accountURL, "packages", fakePackageId), getPackageWithDisks)
+
+		resp, err := do(context.Background(), computeClient)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if resp == nil {
+			t.Fatalf("Expected an output but got nil")
+		}
+
+		if resp.Brand != "bhyve" {
+			t.Fatalf("Expected package brand to be bhyve")
+		}
+
+		if !resp.FlexibleDisk {
+			t.Fatalf("Expected package to have FlexibleDisk")
+		}
+
+		if resp.Disks == nil {
+			t.Fatalf("Expected package to have disks but got nil")
+		}
+
+		if len(resp.Disks) != 3 {
+			t.Fatalf("Expected package to have 3 disks, but got %d",
+				len(resp.Disks))
+		}
+
+		// Test disks are as expected.
+
+		disk0 := resp.Disks[0]
+		if disk0.Size != nil {
+			t.Fatalf("Expected disk[0].Size to be nil, got %v",
+				disk0.Size)
+		}
+		if disk0.SizeInMiB != 0 {
+			t.Fatalf("Expected disk[0].SizeInMB to be 0, got %d",
+				disk0.SizeInMiB)
+		}
+		if disk0.Remaining != false {
+			t.Fatalf("Expected disk[0].Remaining to be false")
+		}
+		if disk0.OSDiskSize != true {
+			t.Fatalf("Expected disk[0].OSDiskSize to be true")
+		}
+
+		disk1 := resp.Disks[1]
+		if disk1.Size.(float64) != 6144 {
+			t.Fatalf("Expected disk[0].Size to be 6144, got %v",
+				disk1.Size)
+		}
+		if disk1.SizeInMiB != 6144 {
+			t.Fatalf("Expected disk[0].SizeInMB to be 6144, got %d",
+				disk1.SizeInMiB)
+		}
+		if disk1.Remaining != false {
+			t.Fatalf("Expected disk[0].Remaining to be false")
+		}
+		if disk1.OSDiskSize != false {
+			t.Fatalf("Expected disk[0].OSDiskSize to be false")
+		}
+
+		disk2 := resp.Disks[2]
+		if disk2.Size != "remaining" {
+			t.Fatalf("Expected disk[0].Size to be remaining, got %v",
+				disk2.Size)
+		}
+		if disk2.SizeInMiB != 0 {
+			t.Fatalf("Expected disk[0].SizeInMB to be 0, got %d",
+				disk2.SizeInMiB)
+		}
+		if disk2.Remaining != true {
+			t.Fatalf("Expected disk[0].Remaining to be true")
+		}
+		if disk2.OSDiskSize != false {
+			t.Fatalf("Expected disk[0].OSDiskSize to be false")
+		}
+	})
 }
 
 func listPackagesFiltered(req *http.Request) (*http.Response, error) {
@@ -426,4 +545,38 @@ func getPackageEmpty(req *http.Request) (*http.Response, error) {
 
 func getPackageError(req *http.Request) (*http.Response, error) {
 	return nil, errors.New("unable to get package")
+}
+
+func getPackageWithDisks(req *http.Request) (*http.Response, error) {
+	header := http.Header{}
+	header.Add("Content-Type", "application/json")
+
+	body := strings.NewReader(`{
+    "brand": "bhyve",
+    "default": true,
+    "disk": 24576,
+    "id": "7b17343c-94af-6266-e0e8-893a3b9993d0",
+    "lwps": 4000,
+    "memory": 1024,
+    "name": "sample-bhyve-three-disks",
+    "swap": 4096,
+    "vcpus": 1,
+    "version": "1.0.0",
+    "flexible_disk": true,
+    "disks": [
+        {},
+        {
+            "size": 6144
+        },
+        {
+            "size": "remaining"
+        }
+    ]
+}`)
+
+	return &http.Response{
+		StatusCode: 200,
+		Header:     header,
+		Body:       ioutil.NopCloser(body),
+	}, nil
 }

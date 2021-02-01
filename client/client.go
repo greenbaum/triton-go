@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Joyent, Inc.
+// Copyright 2020 Joyent, Inc.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/authentication"
 	"github.com/joyent/triton-go/errors"
+	tritonutils "github.com/joyent/triton-go/utils"
 	pkgerrors "github.com/pkg/errors"
 )
 
@@ -47,6 +49,9 @@ var (
 
 	jpcFormatURL = "https://tsg.%s.svc.joyent.zone"
 	spcFormatURL = "https://tsg.%s.svc.samsungcloud.zone"
+
+	tritonTransportHttpTraceChecked = false
+	tritonTransportHttpTraceEnabled = false
 )
 
 // Client represents a connection to the Triton Compute or Object Storage APIs.
@@ -72,6 +77,21 @@ func isPrivateInstall(url string) bool {
 	}
 
 	return true
+}
+
+func wrapTritonTransport(in http.RoundTripper) http.RoundTripper {
+	if tritonTransportHttpTraceChecked == false {
+		tritonTransportHttpTraceChecked = true
+		if os.Getenv("TRITON_TRACE_HTTP") != "" {
+			tritonTransportHttpTraceEnabled = true
+		}
+	}
+
+	if tritonTransportHttpTraceEnabled {
+		return tritonutils.TraceRoundTripper(in)
+	}
+
+	return in
 }
 
 // parseDC parses out the data center commonly found in Triton URLs. Returns an
@@ -146,9 +166,11 @@ func New(tritonURL string, mantaURL string, accountName string, signers ...authe
 		}
 	}
 
+	skipTLSVerify := triton.GetEnv("SKIP_TLS_VERIFY") != ""
+
 	newClient := &Client{
 		HTTPClient: &http.Client{
-			Transport:     httpTransport(false),
+			Transport:     httpTransport(skipTLSVerify),
 			CheckRedirect: doNotFollowRedirects,
 		},
 		//WSDialer:    &websocket.Dialer{},
@@ -158,6 +180,9 @@ func New(tritonURL string, mantaURL string, accountName string, signers ...authe
 		ServicesURL: *servicesURL,
 		AccountName: accountName,
 	}
+
+	// Allow wrapping of the HTTP Transport.
+	newClient.HTTPClient.Transport = wrapTritonTransport(newClient.HTTPClient.Transport)
 
 	// Default to constructing an SSHAgentSigner if there are no other signers
 	// passed into NewClient and there's an TRITON_KEY_ID and SSH_AUTH_SOCK
@@ -203,6 +228,8 @@ func (c *Client) InsecureSkipTLSVerify() {
 	}
 
 	c.HTTPClient.Transport = httpTransport(true)
+	// Allow wrapping of the HTTP Transport.
+	c.HTTPClient.Transport = wrapTritonTransport(c.HTTPClient.Transport)
 	c.WSDialer = wsTransport(true)
 }
 

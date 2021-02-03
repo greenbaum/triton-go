@@ -17,7 +17,7 @@ import (
 
 	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/authentication"
-	"github.com/joyent/triton-go/compute"
+	"github.com/joyent/triton-go/changefeed"
 )
 
 func main() {
@@ -82,11 +82,10 @@ func main() {
 		Signers:     []authentication.Signer{signer},
 	}
 
-	c, err := compute.NewClient(config)
+	c, err := changefeed.NewClient(config)
 	if err != nil {
-		log.Fatalf("compute.NewClient: %v", err)
+		log.Fatalf("changefeed.NewClient: %v", err)
 	}
 
-	changefeedInput := &compute.SubscribeInput{}
-	c.Instances().Subscribe(context.Background(), changefeedInput)
+	c.Feed().Get(context.Background())
 }

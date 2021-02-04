@@ -14,7 +14,10 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
+	"time"
 
+	"github.com/gorilla/websocket"
 	triton "github.com/joyent/triton-go"
 	"github.com/joyent/triton-go/authentication"
 	"github.com/joyent/triton-go/changefeed"
@@ -82,10 +85,39 @@ func main() {
 		Signers:     []authentication.Signer{signer},
 	}
 
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+
+	done := make(chan struct{})
+
 	c, err := changefeed.NewClient(config)
 	if err != nil {
 		log.Fatalf("changefeed.NewClient: %v", err)
 	}
 
-	c.Feed().Get(context.Background())
+	defer close(done)
+	c.Feed().Subscribe(context.Background())
+
+	for {
+		select {
+		// Block until interrupted. Then send the close message to the server and wait for our other read/write Goroutine
+		// to signal 'done', to safely terminate the WebSocket connection.
+		case <-interrupt:
+			log.Println("Client interrupted.")
+			err = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			if err != nil {
+				log.Println("WebSocket Close Error: ", err)
+			}
+			// Wait for 'done' or one second to pass.
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+			return
+		// WebSocket has terminated before interrupt.
+		case <-done:
+			log.Println("WebSocket connection terminated.")
+			return
+		}
+	}
 }

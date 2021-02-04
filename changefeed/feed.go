@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
 	"path"
-	"time"
 
 	"encoding/json"
 
@@ -49,15 +46,16 @@ type ChangeKind struct {
 	SubResources []string `json:"subResources"`
 }
 
-func (c *FeedClient) Get(ctx context.Context) {
+type SubscribeOptions struct {
+	Instances []string `json:"vms"`
+}
+
+func (c *FeedClient) Subscribe(ctx context.Context, opts *SubscribeOptions) <-chan *ChangeItem {
 	fullPath := path.Join("/", c.client.AccountName, "changefeed")
 	reqInputs := client.RequestInput{
 		Method: http.MethodGet,
 		Path:   fullPath,
 	}
-
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
 
 	conn, err := c.client.ExecuteRequestChangeFeed(ctx, reqInputs)
 	if err != nil {
@@ -68,18 +66,24 @@ func (c *FeedClient) Get(ctx context.Context) {
 	var register = &ChangeKind{
 		Resource: "vm",
 		SubResources: []string{
+			"alias",
+			"customer_metadata",
+			"destroyed",
+			"nics",
+			"owner_uuid",
+			"server_uuid",
 			"state",
+			"tags",
 		},
 	}
 
 	msg, _ := json.Marshal(register)
 
-	done := make(chan struct{})
+	change := make(chan *ChangeItem)
 
 	// This Goroutine is our read/write loop. It keeps going until it cannot use the WebSocket anymore.
 	go func() {
 		defer conn.Close()
-		defer close(done)
 
 		// Send Registration Message
 		err = conn.WriteMessage(websocket.TextMessage, msg)
@@ -95,37 +99,19 @@ func (c *FeedClient) Get(ctx context.Context) {
 				}
 				break
 			}
-			var change *ChangeItem
-			err = json.Unmarshal(message, &change)
+			var ci *ChangeItem
+			err = json.Unmarshal(message, &ci)
 			if err != nil {
 				fmt.Println(err)
 			}
+			change <- ci
 
 			fmt.Printf("%+v\n", change)
 		}
 	}()
 
-	for {
-		select {
-		// TODO: this is handy for testing, but maybe not needed in the triton-go lib, transfer to example?
-		// Block until interrupted. Then send the close message to the server and wait for our other read/write Goroutine
-		// to signal 'done', to safely terminate the WebSocket connection.
-		case <-interrupt:
-			log.Println("Client interrupted.")
-			err = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				log.Println("WebSocket Close Error: ", err)
-			}
-			// Wait for 'done' or one second to pass.
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-			}
-			return
-		// WebSocket has terminated before interrupt.
-		case <-done:
-			log.Println("WebSocket connection terminated.")
-			return
-		}
+	// block and wait for cancel
+	select {
+	case <-ctx.Done():
 	}
 }

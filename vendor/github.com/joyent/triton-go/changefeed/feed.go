@@ -49,7 +49,7 @@ type ChangeKind struct {
 	SubResources []string `json:"subResources"`
 }
 
-func (c *FeedClient) Get(ctx context.Context) {
+func (c *FeedClient) Subscribe(ctx context.Context) <-chan *ChangeItem {
 	fullPath := path.Join("/", c.client.AccountName, "changefeed")
 	reqInputs := client.RequestInput{
 		Method: http.MethodGet,
@@ -74,6 +74,7 @@ func (c *FeedClient) Get(ctx context.Context) {
 
 	msg, _ := json.Marshal(register)
 
+	changeChannel := make(chan *ChangeItem)
 	done := make(chan struct{})
 
 	// This Goroutine is our read/write loop. It keeps going until it cannot use the WebSocket anymore.
@@ -101,12 +102,16 @@ func (c *FeedClient) Get(ctx context.Context) {
 				fmt.Println(err)
 			}
 
+			changeChannel <- change
 			fmt.Printf("%+v\n", change)
 		}
 	}()
 
 	for {
 		select {
+		case <-changeChannel:
+			log.Println("Got ChangeItem.")
+			return changeChannel
 		// TODO: this is handy for testing, but maybe not needed in the triton-go lib, transfer to example?
 		// Block until interrupted. Then send the close message to the server and wait for our other read/write Goroutine
 		// to signal 'done', to safely terminate the WebSocket connection.
@@ -121,11 +126,11 @@ func (c *FeedClient) Get(ctx context.Context) {
 			case <-done:
 			case <-time.After(time.Second):
 			}
-			return
+			return nil
 		// WebSocket has terminated before interrupt.
 		case <-done:
 			log.Println("WebSocket connection terminated.")
-			return
+			return nil
 		}
 	}
 }
